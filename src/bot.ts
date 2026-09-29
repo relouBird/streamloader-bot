@@ -621,6 +621,7 @@ export default class Bot {
             "/media/download/start",
             {
               url,
+              provider: "bot",
               quality: isAudio ? "audio" : "1080p",
               title: "video",
             },
@@ -695,6 +696,10 @@ export default class Bot {
       }
     });
   }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  HELPERS
+  // ─────────────────────────────────────────────────────────────────
 
   /**
    * Extrait un court échantillon audio via l'API (réutilise /download/start
