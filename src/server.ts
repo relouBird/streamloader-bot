@@ -175,11 +175,11 @@ export default class Server {
     this.server = this.app?.listen(this.port, () => {
       console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║  StreamBot v1.0 — ${this.prod ? "PRODUCTION " : "DÉVELOPPEMENT"}                             ║
-║  Port : ${String(this.port).padEnd(52)}║
+║  StreamLoaders Bot v1.0 — ${this.prod ? "PRODUCTION   " : "DÉVELOPPEMENT"}                      ║
+║  Port : ${String(this.port).padEnd(53)}║
 ╠══════════════════════════════════════════════════════════════╣
 ║  ✅ Rate limiting                                            ║
-║  ✅ CORS (${(this.prod ? "strict" : "dev : *").padEnd(51)}║
+║  ✅ CORS (${(this.prod ? "strict" : "dev : *"+ ")").padEnd(51)}║
 ║  ✅ Graceful shutdown (SIGINT / SIGTERM)                     ║
 ╚══════════════════════════════════════════════════════════════╝`);
     });

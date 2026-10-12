@@ -1,10 +1,11 @@
 {
-  "name": "streamloader-web",
+  "name": "streamloader-bot",
   "version": "2.1.0",
-  "description": "Téléchargeur vidéo universel — StreamLoader",
+  "description": "Téléchargeur vidéo universel - StreamLoaders",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run copy-public",
+    "copy-public": "copyfiles -u 2 \"src/public/**/*\" dist/public",
     "start": "node dist/index.js",
     "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts"
   },
@@ -21,6 +22,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.21",
     "@types/node": "^24.0.1",
+    "copyfiles": "^2.4.1",
     "nodemon": "^3.1.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"

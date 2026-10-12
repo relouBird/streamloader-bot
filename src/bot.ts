@@ -167,7 +167,7 @@ export default class Bot {
     console.log(
       `${LOG} 👑 IDs Premium configurés : ${this.premiumTelegramIds.size}`,
     );
-    console.log(LOG + " 🤖 Bot Telegram StreamLoader démarré — mode API");
+    console.log(LOG + " 🤖 Bot Telegram StreamLoaders démarré — mode API");
   }
 
   private async registerWebhook() {
@@ -423,7 +423,7 @@ export default class Bot {
       console.log("Nouveau /start de " + msg.chat.username);
       this.safeSend(
         msg.chat.id,
-        `👋 Salut ! Bienvenue sur *StreamLoader Bot* 🚀\n\n` +
+        `👋 Salut ! Bienvenue sur *StreamLoaders Bot* 🚀\n\n` +
           `Envoie-moi le lien d'une vidéo (YouTube, TikTok, Instagram...) et télécharge-la instantanément.\n\n` +
           `💡 Les membres Premium du site profitent de téléchargements illimités et sans restriction de durée !`,
         { parse_mode: "Markdown" },
