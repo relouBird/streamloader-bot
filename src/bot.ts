@@ -13,8 +13,6 @@ import TelegramBot, {
 
 const LOG = "[BOT]";
 
-const PENDING_URL_TTL_MS = 15 * 60 * 1000;
-
 // ⚠️ Porté depuis bot.js : la valeur y avait été réduite à 4 min (240s)
 // pour les gratuits, contre 15 min (900s) dans la version précédente de
 // ce fichier. Je garde la valeur la plus récente (bot.js), mais vérifie
@@ -23,21 +21,36 @@ const PENDING_URL_TTL_MS = 15 * 60 * 1000;
 const FREE_MAX_DURATION_SECONDS = 240;
 const FREE_DAILY_DOWNLOAD_LIMIT = 30;
 
+// Verrou anti double-clic sur les boutons d'un même message. Assez court
+// pour ne pas gêner un utilisateur qui se ravise, assez long pour absorber
+// le double-tap habituel de Telegram (~200-500 ms).
+const TAP_LOCK_TTL_MS = 2 * 60 * 1000;
+
+// Token partagé avec l'API Node : envoyé en en-tête `x-bot-token` sur
+// chaque requête HTTP. Le controller Node peut ainsi identifier les
+// requêtes issues du bot (utile pour des règles de quota spécifiques).
+const BOT_API_TOKEN = process.env.X_BOT_SECRET || "";
+
 const SHAZAM_API_KEY = process.env.SHAZAM_API_KEY || "";
 const SHAZAM_API_HOST =
   process.env.SHAZAM_API_HOST || "shazam-api-free.p.rapidapi.com";
-
-interface PendingUrl {
-  url: string;
-  title: string;
-  duration: number;
-  createdAt: number;
-}
 
 interface DailyQuotaEntry {
   day: string; // "YYYY-MM-DD"
   count: number;
 }
+
+/**
+ * Échappe les caractères HTML critiques lorsqu'on envoie du contenu avec
+ * `parse_mode: "HTML"`. Évite qu'un titre de vidéo contenant `<`, `>`, `&`
+ * ou `"` ne casse le rendu du message Telegram.
+ */
+const escapeHtml = (s: string): string =>
+  s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 
 export default class Bot {
   readonly token: string;
@@ -55,7 +68,14 @@ export default class Bot {
   readonly TMP_DIR = path.join(__dirname, "tmp");
   readonly HOURGLASS = "\u23F3";
 
-  protected pendingUrls: Map<string, PendingUrl> = new Map();
+  // ── Anti double-clic uniquement ─────────────────────────────────
+  // On ne stocke PLUS l'URL dans une Map en mémoire : c'était la cause
+  // racine du bug « Ce lien a expiré » (la Map disparaissait au moindre
+  // redémarrage du process, ce qui est fréquent en mode webhook sur
+  // Passenger). Désormais l'URL voyage dans le message Telegram lui-même,
+  // sous forme de lien caché sur le titre de la vidéo, et nous est
+  // restituée à chaque clic via `callback_query.message.entities`.
+  protected handledTaps = new Set<string>();
 
   // ── Premium par ID Telegram (porté depuis bot.js) ────────────────
   // Mécanisme volontairement simple : une liste d'IDs Telegram considérés
@@ -212,6 +232,14 @@ export default class Bot {
   // ─────────────────────────────────────────────────────────────────
   private setupInterceptors() {
     this.api!.interceptors.request.use((config) => {
+      // Identifie les requêtes comme provenant du bot. Le controller
+      // Node peut ainsi distinguer un appel bot d'un appel site web
+      // (`x-bot-token` comparé à `ENV.X_BOT_SECRET`).
+      if (BOT_API_TOKEN) {
+        config.headers = config.headers ?? {};
+        (config.headers as Record<string, string>)["x-bot-token"] =
+          BOT_API_TOKEN;
+      }
       console.log(
         `${LOG} → ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`,
         config.params ? { params: config.params } : "",
@@ -257,33 +285,23 @@ export default class Bot {
   private startCleanupTimer() {
     this.cleanupTimer = setInterval(
       () => {
-        const now = Date.now();
+        // Purge des entrées de quota d'un jour révolu. La purge des
+        // URLs en attente a été retirée : il n'y a plus de `pendingUrls`
+        // en mémoire (l'URL vit dans le message Telegram lui-même).
+        const today = new Date().toISOString().slice(0, 10);
         let cleaned = 0;
-        for (const [id, entry] of this.pendingUrls) {
-          if (now - entry.createdAt > PENDING_URL_TTL_MS) {
-            this.pendingUrls.delete(id);
+        for (const [key, entry] of this.dailyDownloads) {
+          if (entry.day !== today) {
+            this.dailyDownloads.delete(key);
             cleaned++;
           }
         }
-        // Purge aussi les entrées de quota d'un jour révolu.
-        const today = new Date().toISOString().slice(0, 10);
-        for (const [key, entry] of this.dailyDownloads) {
-          if (entry.day !== today) this.dailyDownloads.delete(key);
-        }
         if (cleaned > 0)
-          console.log(`${LOG} 🗑️ ${cleaned} URL(s) expirée(s) nettoyée(s)`);
+          console.log(`${LOG} 🗑️ ${cleaned} entrée(s) de quota purgée(s)`);
       },
       5 * 60 * 1000,
     );
     this.cleanupTimer.unref();
-  }
-
-  private generateShortId(): string {
-    let id: string;
-    do {
-      id = crypto.randomBytes(6).toString("hex");
-    } while (this.pendingUrls.has(id));
-    return id;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -353,6 +371,25 @@ export default class Bot {
         `${LOG} ⚠️ safeDelete échoué (chatId=${chatId}, messageId=${messageId}):`,
         (e as Error).message,
       );
+    }
+  }
+
+  /**
+   * Retire les boutons d'un message (utilisé après un clic pour éviter
+   * tout clic supplémentaire). Best-effort — on ignore les erreurs.
+   */
+  private async clearReplyMarkup(
+    chatId: number,
+    messageId: number | undefined,
+  ): Promise<void> {
+    if (!messageId) return;
+    try {
+      await this.bot?.editMessageReplyMarkup(
+        { inline_keyboard: [] },
+        { chat_id: chatId, message_id: messageId },
+      );
+    } catch {
+      /* message trop ancien, déjà édité, ou supprimé — on ignore */
     }
   }
 
@@ -491,39 +528,40 @@ export default class Bot {
         );
       }
 
-      const shortId = this.generateShortId();
-      this.pendingUrls.set(shortId, {
-        url: text,
-        title: data.title || "video",
-        duration,
-        createdAt: Date.now(),
-      });
-      console.log(`${LOG} 🔑 URL mappée : id=${shortId}`);
+      // L'URL est embarquée dans le message sous forme de lien caché sur
+      // le titre. Le bouton ne transporte plus qu'un id court (la durée
+      // arrondie) — donc le clic fonctionne même après un redémarrage du
+      // process (Passenger, webhook, redéploiement...). Telegram conserve
+      // les messages et leurs entités côté serveur (≈ 48h), ce qui est
+      // bien supérieur à n'importe quel TTL mémoire.
+      const safeTitle = data.title || "video";
+      const durationRounded = Math.round(duration);
 
       await this.safeDelete(chatId, analyzingMsg.message_id);
       await this.safeSend(
         chatId,
-        `📹 *${data.title}*\n\nQue veux-tu télécharger ?`,
+        `📹 <a href="${escapeHtml(text)}">${escapeHtml(safeTitle)}</a>\n\nQue veux-tu télécharger ?`,
         {
-          parse_mode: "Markdown",
+          parse_mode: "HTML",
+          link_preview_options: { is_disabled: true },
           reply_markup: {
             inline_keyboard: [
               [
                 {
                   text: "🎵 Musique Officielle (Complète)",
-                  callback_data: `dl|music|${shortId}`,
+                  callback_data: `dl|music|${durationRounded}`,
                 },
               ],
               [
                 {
                   text: "🎬 Vidéo HD (MP4)",
-                  callback_data: `dl|vid|${shortId}`,
+                  callback_data: `dl|vid|${durationRounded}`,
                 },
               ],
               [
                 {
                   text: "🔊 Audio de la vidéo (MP3)",
-                  callback_data: `dl|aud|${shortId}`,
+                  callback_data: `dl|aud|${durationRounded}`,
                 },
               ],
             ],
@@ -538,18 +576,63 @@ export default class Bot {
       const chatId = query.message?.chat.id;
       if (!chatId) return;
 
-      const [action, type, shortId] = query.data?.split("|") ?? ["", "", ""];
+      const [action, type, durationRaw] = query.data?.split("|") ?? [
+        "",
+        "",
+        "",
+      ];
       if (action !== "dl") return;
 
-      const pending = this.pendingUrls.get(shortId);
-      if (!pending) {
-        console.warn(`${LOG} ⚠️ shortId inconnu/expiré : ${shortId}`);
+      // Récupération de l'URL depuis les entités du message d'origine.
+      // Telegram nous renvoie le message complet à chaque callback, avec
+      // la liste d'entités — dont notre lien caché de type "text_link".
+      const message = query.message;
+      const messageText = message && "text" in message ? message.text : undefined;
+      const linkEntity =
+        message && "entities" in message
+          ? (message.entities?.find((e) => e.type === "text_link") as
+              | { type: "text_link"; offset: number; length: number; url: string }
+              | undefined)
+          : undefined;
+
+      if (!messageText || !linkEntity?.url) {
         return this.safeAnswerCallback(query.id, {
-          text: "Ce lien a expiré, renvoie-le pour recommencer.",
+          text: "Message trop ancien, renvoie le lien pour recommencer.",
           show_alert: true,
         });
       }
-      this.pendingUrls.delete(shortId);
+
+      // Verrou anti double-clic : si l'utilisateur spam le même bouton,
+      // on ignore les clics suivants. On retire aussi les boutons du
+      // message pour éviter tout clic ultérieur (best-effort).
+      const messageId = query.message?.message_id;
+      const tapKey = `${chatId}:${messageId}`;
+      if (this.handledTaps.has(tapKey)) {
+        return this.safeAnswerCallback(query.id);
+      }
+      this.handledTaps.add(tapKey);
+      setTimeout(
+        () => this.handledTaps.delete(tapKey),
+        TAP_LOCK_TTL_MS,
+      ).unref();
+      void this.clearReplyMarkup(chatId, messageId);
+
+      // Extraction défensive du titre : les offsets Telegram sont en
+      // UTF-16, donc on protège contre tout décalage éventuel.
+      const url = linkEntity.url;
+      let videoTitle = "video";
+      try {
+        const extracted = messageText.substring(
+          linkEntity.offset,
+          linkEntity.offset + linkEntity.length,
+        );
+        if (extracted) videoTitle = extracted;
+      } catch {
+        /* garde "video" par défaut */
+      }
+
+      const duration = Number(durationRaw) || 0;
+      const isAudio = type === "aud" || type === "music";
 
       const isPremium = this.isPremium(query.from?.id);
       if (!isPremium && !this.consumeDailyQuota(chatId)) {
@@ -558,9 +641,6 @@ export default class Bot {
           show_alert: true,
         });
       }
-
-      const { url, title: videoTitle, duration } = pending;
-      const isAudio = type === "aud" || type === "music";
 
       await this.safeAnswerCallback(query.id, {
         text:
