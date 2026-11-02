@@ -180,6 +180,21 @@ et applique un limiteur global de 200 requêtes par IP toutes les 15 minutes.
 Des limiteurs plus ciblés sont disponibles dans
 [`src/utils/limiters.ts`](./src/utils/limiters.ts).
 
+Le déploiement PlanetHoster est décrit par deux workflows GitHub Actions :
+
+- [`main.yml`](./.github/workflows/main.yml) déploie automatiquement chaque
+  push sur `main` ;
+- [`first-deployment.yml`](./.github/workflows/first-deployment.yml) initialise
+  manuellement une nouvelle installation.
+
+Le fichier `.env` de production doit être créé directement sur le serveur
+avant le premier déploiement. Les workflows ne copient jamais les fichiers
+`.env` locaux et ne transmettent pas les secrets de production dans le dépôt.
+Les mises à jour utilisent l'ancien et le nouveau commit de `main`, conservent
+le `.env` serveur et ne réinitialisent pas la base de données. Le démarrage de
+l'application applique uniquement les créations de tables et migrations
+additives prévues par [`initORM.ts`](./src/database/initORM.ts).
+
 ## Branches de travail
 
 La hiérarchie de branches prévue pour ce projet est :

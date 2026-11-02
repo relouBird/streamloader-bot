@@ -83,6 +83,9 @@ typings/
 .env.test.*
 .env.prod.*
 
+# Gérer les fichiers de configuration Apache
+.htaccess
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 
