@@ -10,6 +10,7 @@ import TelegramBot, {
   SendMessageParams,
   Update,
 } from "node-telegram-bot-api";
+import { queries } from "./database/queries";
 
 const LOG = "[BOT]";
 
@@ -19,7 +20,9 @@ const LOG = "[BOT]";
 // que c'est bien la limite que tu veux — les deux fichiers étaient en
 // désaccord.
 const FREE_MAX_DURATION_SECONDS = 240;
-const FREE_DAILY_DOWNLOAD_LIMIT = 30;
+const FREE_DAILY_DOWNLOAD_LIMIT = 20;
+const LINK_PROMPT =
+  "🔐 Envoie ta clé API en réponse à ce message pour lier ton compte.";
 
 // Verrou anti double-clic sur les boutons d'un même message. Assez court
 // pour ne pas gêner un utilisateur qui se ravise, assez long pour absorber
@@ -34,11 +37,6 @@ const BOT_API_TOKEN = process.env.X_BOT_SECRET || "";
 const SHAZAM_API_KEY = process.env.SHAZAM_API_KEY || "";
 const SHAZAM_API_HOST =
   process.env.SHAZAM_API_HOST || "shazam-api-free.p.rapidapi.com";
-
-interface DailyQuotaEntry {
-  day: string; // "YYYY-MM-DD"
-  count: number;
-}
 
 /**
  * Échappe les caractères HTML critiques lorsqu'on envoie du contenu avec
@@ -63,7 +61,6 @@ export default class Bot {
 
   protected bot: TelegramBot | undefined;
   protected api: AxiosInstance | undefined;
-  protected cleanupTimer: NodeJS.Timeout | undefined;
 
   readonly TMP_DIR = path.join(__dirname, "tmp");
   readonly HOURGLASS = "\u23F3";
@@ -77,35 +74,11 @@ export default class Bot {
   // restituée à chaque clic via `callback_query.message.entities`.
   protected handledTaps = new Set<string>();
 
-  // ── Premium par ID Telegram (porté depuis bot.js) ────────────────
-  // Mécanisme volontairement simple : une liste d'IDs Telegram considérés
-  // Premium, configurée via l'env `TELEGRAM_PREMIUM_IDS` (CSV). Ça évite au
-  // bot d'avoir besoin d'un accès direct à la base de données de l'app web
-  // (il reste un simple client HTTP de l'API) — mais ça veut dire que le
-  // statut Premium doit être maintenu manuellement ici pour l'instant. Une
-  // vraie liaison de compte (web ↔ Telegram) resterait la solution propre
-  // à terme.
-  protected premiumTelegramIds: Set<string>;
-
-  // ── Quota journalier gratuit (en mémoire, pas de DB côté bot) ────────
-  // Contrairement à bot.js (qui utilisait `queries.countDailyDownloads`
-  // sur la DB partagée), ce bot n'a pas d'accès DB direct — c'est
-  // volontaire (voir doc §9 : le video-service et le bot ne connaissent
-  // pas les plans). Le compteur est donc en mémoire, remis à zéro
-  // naturellement au changement de jour (clé "chatId:YYYY-MM-DD"), mais
-  // NE SURVIT PAS à un redémarrage du bot. Si tu veux une vraie
-  // persistance, il faudra exposer un endpoint de quota côté API centrale.
-  protected dailyDownloads: Map<string, DailyQuotaEntry> = new Map();
-
   constructor(
     token: string,
     apiUrl: string,
     publicUrl: string = "",
     useWebhook: boolean = false,
-    premiumTelegramIds: string[] = (process.env.TELEGRAM_PREMIUM_IDS || "")
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean),
   ) {
     if (!token) throw new Error("TELEGRAM_BOT_TOKEN manquant dans .env");
     if (!apiUrl) throw new Error("API_URL manquant dans .env");
@@ -120,8 +93,6 @@ export default class Bot {
     this.apiUrl = apiUrl;
     this.publicUrl = publicUrl.replace(/\/+$/, "");
     this.useWebhook = useWebhook;
-    this.premiumTelegramIds = new Set(premiumTelegramIds);
-
     this.webhookUrlToken = crypto
       .createHash("sha256")
       .update(`${token}:path`)
@@ -138,29 +109,8 @@ export default class Bot {
     return `/telegram/webhook/${this.webhookUrlToken}`;
   }
 
-  isPremium(fromId: number | string | undefined): boolean {
-    return this.premiumTelegramIds.has(String(fromId));
-  }
-
-  /**
-   * Vérifie et incrémente le quota journalier gratuit. Retourne `true` si
-   * la requête est autorisée (et compte pour le quota), `false` si le
-   * quota du jour est déjà atteint.
-   */
-  private consumeDailyQuota(chatId: number): boolean {
-    const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
-    const key = String(chatId);
-    const entry = this.dailyDownloads.get(key);
-
-    if (!entry || entry.day !== today) {
-      this.dailyDownloads.set(key, { day: today, count: 1 });
-      return true;
-    }
-    if (entry.count >= FREE_DAILY_DOWNLOAD_LIMIT) {
-      return false;
-    }
-    entry.count++;
-    return true;
+  private getLinkedUser(telegramId: number) {
+    return queries.getUserByTelegramId(telegramId);
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -175,7 +125,6 @@ export default class Bot {
     this.setupInterceptors();
     this.setupErrorHandlers();
     this.ensureTmpDir();
-    this.startCleanupTimer();
 
     if (this.useWebhook) {
       await this.registerWebhook();
@@ -184,9 +133,6 @@ export default class Bot {
     }
 
     console.log(LOG + " API URL : " + this.apiUrl);
-    console.log(
-      `${LOG} 👑 IDs Premium configurés : ${this.premiumTelegramIds.size}`,
-    );
     console.log(LOG + " 🤖 Bot Telegram StreamLoaders démarré — mode API");
   }
 
@@ -280,28 +226,6 @@ export default class Bot {
       fs.mkdirSync(this.TMP_DIR, { recursive: true });
       console.log(`${LOG} 📁 TMP_DIR créé : ${this.TMP_DIR}`);
     }
-  }
-
-  private startCleanupTimer() {
-    this.cleanupTimer = setInterval(
-      () => {
-        // Purge des entrées de quota d'un jour révolu. La purge des
-        // URLs en attente a été retirée : il n'y a plus de `pendingUrls`
-        // en mémoire (l'URL vit dans le message Telegram lui-même).
-        const today = new Date().toISOString().slice(0, 10);
-        let cleaned = 0;
-        for (const [key, entry] of this.dailyDownloads) {
-          if (entry.day !== today) {
-            this.dailyDownloads.delete(key);
-            cleaned++;
-          }
-        }
-        if (cleaned > 0)
-          console.log(`${LOG} 🗑️ ${cleaned} entrée(s) de quota purgée(s)`);
-      },
-      5 * 60 * 1000,
-    );
-    this.cleanupTimer.unref();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -478,6 +402,31 @@ export default class Bot {
         { parse_mode: "Markdown" },
       );
     });
+
+    this.bot?.onText(/^\/(?:menu|link)/, async (msg) => {
+      await this.safeSend(
+        msg.chat.id,
+        "⚙️ *Menu StreamLoaders*\n\nChoisis une action :",
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            keyboard: [[{ text: "🔗 Lier mon compte" }], [{ text: "ℹ️ Aide" }]],
+            resize_keyboard: true,
+            one_time_keyboard: true,
+          },
+        },
+      );
+    });
+
+    this.bot?.onText(/^🔗 Lier mon compte$/, async (msg) => {
+      await this.safeSend(msg.chat.id, LINK_PROMPT, {
+        reply_markup: { force_reply: true, selective: true },
+      });
+    });
+
+    this.bot?.onText(/^ℹ️ Aide$/, (msg) => {
+      this.safeSend(msg.chat.id, "/help");
+    });
   }
 
   getMessage() {
@@ -485,6 +434,37 @@ export default class Bot {
       const chatId = msg.chat.id;
       const text = msg.text;
       if (!text || text.startsWith("/")) return;
+
+      if (msg.reply_to_message?.text === LINK_PROMPT) {
+        const apiKey = text.trim();
+        if (apiKey.length < 16 || apiKey.length > 255) {
+          return void this.safeSend(chatId, "❌ Cette clé API semble invalide.");
+        }
+        try {
+          const apiKeyHash = crypto
+            .createHash("sha256")
+            .update(apiKey)
+            .digest("hex");
+          const user = await queries.linkTelegramAccount(apiKeyHash, chatId);
+          if (!user) {
+            return void this.safeSend(
+              chatId,
+              "❌ Clé API invalide ou compte déjà lié à un autre Telegram.",
+            );
+          }
+          return void this.safeSend(
+            chatId,
+            `✅ Compte lié : *${escapeHtml(user.email)}*\nPlan actuel : *${user.plan}*.`,
+            { parse_mode: "Markdown" },
+          );
+        } catch (error) {
+          console.error(`${LOG} ❌ liaison Telegram :`, (error as Error).message);
+          return void this.safeSend(
+            chatId,
+            "❌ Impossible de lier le compte pour le moment.",
+          );
+        }
+      }
 
       try {
         const parsed = new URL(text);
@@ -514,7 +494,10 @@ export default class Bot {
       }
 
       const duration = data.duration || 0;
-      const isPremium = this.isPremium(msg.from?.id);
+      const user = msg.from?.id
+        ? await this.getLinkedUser(msg.from.id)
+        : null;
+      const isPremium = user?.plan === "premium";
 
       if (!isPremium && duration > FREE_MAX_DURATION_SECONDS) {
         const minutes = Math.ceil(duration / 60);
@@ -634,12 +617,28 @@ export default class Bot {
       const duration = Number(durationRaw) || 0;
       const isAudio = type === "aud" || type === "music";
 
-      const isPremium = this.isPremium(query.from?.id);
-      if (!isPremium && !this.consumeDailyQuota(chatId)) {
-        return this.safeAnswerCallback(query.id, {
-          text: `Limite gratuite de ${FREE_DAILY_DOWNLOAD_LIMIT} téléchargements atteinte aujourd'hui.`,
-          show_alert: true,
-        });
+      const user = await this.getLinkedUser(query.from.id);
+      const isPremium = user?.plan === "premium";
+      if (!isPremium) {
+        try {
+          const quota = await queries.consumeDailyDownload(
+            query.from.id,
+            user?.id ?? null,
+            FREE_DAILY_DOWNLOAD_LIMIT,
+          );
+          if (!quota.allowed) {
+            return this.safeAnswerCallback(query.id, {
+              text: `Limite gratuite de ${FREE_DAILY_DOWNLOAD_LIMIT} téléchargements atteinte aujourd'hui.`,
+              show_alert: true,
+            });
+          }
+        } catch (error) {
+          console.error(`${LOG} ❌ quota quotidien :`, (error as Error).message);
+          return this.safeAnswerCallback(query.id, {
+            text: "Quota indisponible, réessaie dans un instant.",
+            show_alert: true,
+          });
+        }
       }
 
       await this.safeAnswerCallback(query.id, {
@@ -926,7 +925,6 @@ export default class Bot {
   // ─────────────────────────────────────────────────────────────────
   async stop() {
     console.log(`${LOG} 🛑 Arrêt du bot...`);
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     try {
       if (this.useWebhook) {
         console.log(`${LOG} ✅ Webhook conservé (redémarrage attendu).`);
