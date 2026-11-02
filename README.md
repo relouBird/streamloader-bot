@@ -135,6 +135,10 @@ npm start
 npm run dev
 ```
 
+La commande `npm run build` compile TypeScript puis copie les assets statiques
+de `src/public/` vers `dist/public/`. Cette seconde étape est nécessaire car
+TypeScript ne copie pas les fichiers HTML, CSS ou autres fichiers non-TS.
+
 Au démarrage, l'application :
 
 1. charge la configuration ;
