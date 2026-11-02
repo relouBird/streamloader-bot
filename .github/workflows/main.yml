@@ -29,9 +29,9 @@ jobs:
             set -e
 
             # Configuration
-            APP_DIR="$HOME/test"
+            APP_DIR="$HOME/test-api"
             REPOSITORY="https://github.com/relouBird/streamloader-bot.git"
-            NODE_ENV_ACTIVATE="$HOME/nodevenv/bot/22/bin/activate"
+            NODE_ENV_ACTIVATE="$HOME/nodevenv/test-api/22/bin/activate"
 
             # Clone or update repository
             if [ ! -d "$APP_DIR/.git" ]; then
@@ -54,8 +54,12 @@ jobs:
 
             cd "$APP_DIR"
 
-            # Install dependencies
-            npm install
+            # Install dependencies, including development dependencies
+            npm ci --include=dev
+
+            # Verify TypeScript
+            npx tsc --version
+
 
             # Build
             npm run build
