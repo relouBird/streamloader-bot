@@ -9,6 +9,7 @@ import TelegramBot, {
   Message,
   SendMessageParams,
   Update,
+  BotCommand,
 } from "node-telegram-bot-api";
 import { queries } from "./database/queries";
 
@@ -124,6 +125,7 @@ export default class Bot {
     this.api = axios.create({ baseURL: this.apiUrl, timeout: 60_000 });
     this.setupInterceptors();
     this.setupErrorHandlers();
+    await this.configureTelegramMenu();
     this.ensureTmpDir();
 
     if (this.useWebhook) {
@@ -134,6 +136,20 @@ export default class Bot {
 
     console.log(LOG + " API URL : " + this.apiUrl);
     console.log(LOG + " 🤖 Bot Telegram StreamLoaders démarré — mode API");
+  }
+
+  private async configureTelegramMenu(): Promise<void> {
+    const commands: BotCommand[] = [
+      { command: "start", description: "Démarrer le bot" },
+      { command: "help", description: "Afficher l'aide" },
+      { command: "link", description: "Lier mon compte avec une clé API" },
+    ];
+
+    await this.bot?.setMyCommands(commands);
+    await this.bot?.setChatMenuButton({
+      menu_button: { type: "commands" },
+    });
+    console.log(`${LOG} ✅ Menu Telegram natif configuré`);
   }
 
   private async registerWebhook() {
@@ -403,29 +419,10 @@ export default class Bot {
       );
     });
 
-    this.bot?.onText(/^\/(?:menu|link)/, async (msg) => {
-      await this.safeSend(
-        msg.chat.id,
-        "⚙️ *Menu StreamLoaders*\n\nChoisis une action :",
-        {
-          parse_mode: "Markdown",
-          reply_markup: {
-            keyboard: [[{ text: "🔗 Lier mon compte" }], [{ text: "ℹ️ Aide" }]],
-            resize_keyboard: true,
-            one_time_keyboard: true,
-          },
-        },
-      );
-    });
-
-    this.bot?.onText(/^🔗 Lier mon compte$/, async (msg) => {
+    this.bot?.onText(/^\/link/, async (msg) => {
       await this.safeSend(msg.chat.id, LINK_PROMPT, {
         reply_markup: { force_reply: true, selective: true },
       });
-    });
-
-    this.bot?.onText(/^ℹ️ Aide$/, (msg) => {
-      this.safeSend(msg.chat.id, "/help");
     });
   }
 
@@ -434,7 +431,6 @@ export default class Bot {
       const chatId = msg.chat.id;
       const text = msg.text;
       if (!text || text.startsWith("/")) return;
-      if (text === "🔗 Lier mon compte" || text === "ℹ️ Aide") return;
 
       if (msg.reply_to_message?.text === LINK_PROMPT) {
         const apiKey = text.trim();

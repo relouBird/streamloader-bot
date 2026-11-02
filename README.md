@@ -48,6 +48,7 @@ et reçoit les webhooks Telegram en production.
 
 - Mode **polling** en développement.
 - Mode **webhook Telegram** en production, avec URL et secret dérivés du token.
+- Menu Telegram natif configuré avec `/start`, `/help` et `/link`.
 - Commandes `/start` et `/help`.
 - Réception d'URLs vidéo HTTP(S), analyse et choix du format.
 - Téléchargement vidéo, audio et identification musicale optionnelle via
