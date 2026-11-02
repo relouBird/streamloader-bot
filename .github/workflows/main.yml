@@ -1,4 +1,4 @@
-name: Deploy to Shared Hosting
+name: Deploy to Shared Hosting[PlanetHoster]
 
 on:
   push:
@@ -6,6 +6,10 @@ on:
       - main
 
   workflow_dispatch:
+
+concurrency:
+  group: planethoster-deployment
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -19,31 +23,50 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
+          port: 5022
+
           script: |
             set -e
 
-            APP_DIR="/home/USERNAME/domains/example.com/public_html"
+            # Configuration
+            APP_DIR="$HOME/test"
+            REPOSITORY="https://github.com/relouBird/streamloader-bot.git"
+            NODE_ENV_ACTIVATE="$HOME/nodevenv/bot/22/bin/activate"
 
-            # 1. Clone or update repository
+            # Clone or update repository
             if [ ! -d "$APP_DIR/.git" ]; then
-              git clone -b main https://github.com/USERNAME/REPOSITORY.git "$APP_DIR"
+              mkdir -p "$APP_DIR"
+
+              if [ -n "$(ls -A "$APP_DIR")" ]; then
+                echo "ERROR: Directory is not empty."
+                exit 1
+              fi
+
+              git clone -b main "$REPOSITORY" "$APP_DIR"
             else
               cd "$APP_DIR"
-              git fetch origin
+              git fetch origin main
               git reset --hard origin/main
             fi
 
+            # Activate Node.js environment
+            source "$NODE_ENV_ACTIVATE"
+
             cd "$APP_DIR"
 
-            # 2. Install dependencies
-            npm ci
+            # Install dependencies
+            npm install
 
-            # 3. Build application
+            # Build
             npm run build
 
-            # 4. Restart application (Passenger / cPanel)
-            mkdir -p tmp
-            touch tmp/restart.txt
+            # Verify build
+            test -f "$APP_DIR/dist/index.js"
+
+            # Restart application
+            /usr/sbin/cloudlinux-selector restart \
+              --json \
+              --interpreter=nodejs \
+              --app-root="$APP_DIR"
 
             echo "Deployment successful!"
