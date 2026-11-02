@@ -25,7 +25,7 @@ jobs:
           port: ${{ secrets.SERVER_SSH_PORT || 5022 }}
           script_stop: true
           script: |
-            set -eu
+            set -e
 
             APP_DIR="$HOME/bot"
             REPOSITORY="https://github.com/relouBird/streamloader-bot.git"
@@ -38,6 +38,11 @@ jobs:
               echo "ERROR: Node environment not found: $NODE_ENV_ACTIVATE"
               exit 1
             fi
+
+            # CloudLinux's activation script reads optional unset variables.
+            # Load it before enabling Bash nounset for the deployment itself.
+            source "$NODE_ENV_ACTIVATE"
+            set -u
 
             if [ ! -d "$APP_DIR/.git" ]; then
               echo "ERROR: Production is not initialized. Run the first-deployment workflow first."
@@ -73,7 +78,6 @@ jobs:
             # Keep all server-side dotfiles (.env*, .htaccess, etc.).
             git clean -fd -e '.*'
 
-            source "$NODE_ENV_ACTIVATE"
             npm ci --include=dev
             npm run build
             test -f "$APP_DIR/dist/index.js"
