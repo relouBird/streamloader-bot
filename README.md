@@ -191,13 +191,14 @@ Le déploiement PlanetHoster est décrit par deux workflows GitHub Actions :
 - [`first-deployment.yml`](./.github/workflows/first-deployment.yml) initialise
   manuellement une nouvelle installation.
 
-Le fichier `.env` de production doit être créé directement sur le serveur
-avant le premier déploiement. Les workflows ne copient jamais les fichiers
-`.env` locaux et ne transmettent pas les secrets de production dans le dépôt.
+Les fichiers de configuration de production (`.env`, `.env.*`, `.htaccess`,
+etc.) doivent être créés directement sur le serveur avant le premier
+déploiement. Les workflows ne copient jamais les fichiers `.env` locaux et ne
+transmettent pas les secrets de production dans le dépôt.
 Les mises à jour utilisent l'ancien et le nouveau commit de `main`, conservent
-le `.env` serveur et ne réinitialisent pas la base de données. Le démarrage de
-l'application applique uniquement les créations de tables et migrations
-additives prévues par [`initORM.ts`](./src/database/initORM.ts).
+les fichiers cachés du serveur et ne réinitialisent pas la base de données. Le
+démarrage de l'application applique uniquement les créations de tables et
+migrations additives prévues par [`initORM.ts`](./src/database/initORM.ts).
 
 ## Branches de travail
 

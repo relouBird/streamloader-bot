@@ -47,7 +47,9 @@ jobs:
             fi
 
             # Keep the production .env and initialize Git beside it.
-            EXTRA_FILE="$(find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env -print -quit)"
+            # Dotfiles are server-side configuration (for example .env* and
+            # .htaccess) and must not block or be replaced by deployment.
+            EXTRA_FILE="$(find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name '.*' -print -quit)"
             if [ -n "$EXTRA_FILE" ]; then
               echo "ERROR: Existing directory contains unexpected files: $EXTRA_FILE"
               exit 1

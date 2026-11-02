@@ -70,7 +70,8 @@ jobs:
 
             # .env is ignored and is deliberately never reset, copied, or generated.
             git reset --hard "$TARGET_SHA"
-            git clean -fd -e .env
+            # Keep all server-side dotfiles (.env*, .htaccess, etc.).
+            git clean -fd -e '.*'
 
             source "$NODE_ENV_ACTIVATE"
             npm ci --include=dev
