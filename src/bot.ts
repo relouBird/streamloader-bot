@@ -434,6 +434,7 @@ export default class Bot {
       const chatId = msg.chat.id;
       const text = msg.text;
       if (!text || text.startsWith("/")) return;
+      if (text === "🔗 Lier mon compte" || text === "ℹ️ Aide") return;
 
       if (msg.reply_to_message?.text === LINK_PROMPT) {
         const apiKey = text.trim();
