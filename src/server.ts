@@ -3,7 +3,6 @@ import cors from "cors";
 import { Request, Response, Express } from "express";
 import path from "path";
 import rateLimit from "express-rate-limit";
-import { db } from "./database/index";
 import Bot from "./bot";
 
 export type GetterFunction = (req: Request, res: Response) => void;
@@ -11,7 +10,6 @@ export type GetterFunction = (req: Request, res: Response) => void;
 export default class Server {
   readonly port: number;
   readonly url: string;
-  readonly secret: string;
   readonly prod: boolean;
 
   protected app: Express | undefined;
@@ -19,11 +17,9 @@ export default class Server {
   protected server: any;
   protected shuttingDown = false;
 
-  constructor(port: number, url: string, secret: string, prod: boolean) {
-    if (!secret) throw new Error("JWT_SECRET manquant dans .env");
+  constructor(port: number, url: string, prod: boolean) {
     this.port = Number(port);
     this.url = url;
-    this.secret = secret;
     this.prod = prod;
   }
 
@@ -221,14 +217,6 @@ export default class Server {
       await this.bot?.stop();
     } catch (err) {
       console.error("[BOT] Erreur lors de l'arrêt :", err);
-    }
-
-    // 3. Fermer le pool MySQL
-    try {
-      await db.end();
-      console.log("[DB] MySQL pool fermé.");
-    } catch (err) {
-      console.error("[DB] Échec fermeture pool :", err);
     }
 
     clearTimeout(killTimer);

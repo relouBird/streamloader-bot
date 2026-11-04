@@ -70,8 +70,7 @@ jobs:
             npm run build
             test -f "$APP_DIR/dist/index.js"
 
-            # Database initialization is non-destructive and runs at application startup.
-            # It creates missing tables and applies additive migrations only.
+            # The bot does not initialize or reset the API database.
             /usr/sbin/cloudlinux-selector restart \
               --json \
               --interpreter=nodejs \

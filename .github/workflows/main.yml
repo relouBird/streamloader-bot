@@ -82,8 +82,7 @@ jobs:
             npm run build
             test -f "$APP_DIR/dist/index.js"
 
-            # The application creates missing tables and applies additive migrations.
-            # No DROP, TRUNCATE, or database reset is performed by this workflow.
+            # The bot does not initialize or reset the API database.
             /usr/sbin/cloudlinux-selector restart \
               --json \
               --interpreter=nodejs \

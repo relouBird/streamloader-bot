@@ -19,9 +19,6 @@ Bot Telegram (ce dépôt)
         | HTTP + X-BOT-SECRET
         v
 API StreamLoaders / service vidéo
-        |
-        v
-MySQL
 ```
 
 Le serveur Express sert aussi une page d'accueil, applique les middlewares
@@ -35,10 +32,10 @@ et reçoit les webhooks Telegram en production.
   dans [`src/index.ts`](./src/index.ts).
 - Le serveur HTTP, le webhook Telegram et `/api/health` sont gérés par
   [`src/server.ts`](./src/server.ts).
-- La connexion MySQL et l'initialisation/migration des tables sont dans
-  [`src/database/`](./src/database/).
-- Le client du service vidéo est préparé dans
-  [`src/utils/videoService.ts`](./src/utils/videoService.ts).
+- Le bot ne lit plus directement la base de données : le compte, le plan, les
+  quotas et les autorisations viennent de l'API dédiée.
+- Les sessions JWT sont conservées dans un cache LRU borné et temporaire,
+  défini dans [`src/utils/sessionStore.ts`](./src/utils/sessionStore.ts).
 - [`api.md`](./api.md) décrit le contrat API cible consommé par le frontend et
   le bot. Dans l'état actuel du bootstrap, les routeurs métier sont encore à
   monter dans `src/index.ts` ; les routes documentées dans `api.md` ne sont
@@ -53,8 +50,7 @@ et reçoit les webhooks Telegram en production.
 - Réception d'URLs vidéo HTTP(S), analyse et choix du format.
 - Téléchargement vidéo, audio et identification musicale optionnelle via
   Shazam/RapidAPI.
-- Limites gratuites : 4 minutes par vidéo et 20 téléchargements par jour,
-  persistées dans MySQL.
+- Les limites gratuites sont appliquées par l'API dédiée.
 - Liaison d'un compte Telegram à un compte du site via une clé API.
 - Nettoyage périodique des fichiers temporaires et arrêt propre du processus.
 
@@ -74,12 +70,7 @@ existe, détermine directement si le plan est `free` ou `premium`.
 │   ├── bot.ts              # Client et handlers Telegram
 │   ├── server.ts           # Serveur Express et webhook
 │   ├── config/env.ts       # Lecture de la configuration
-│   ├── database/
-│   │   ├── index.ts        # Pool MySQL
-│   │   ├── initORM.ts      # Création et migrations idempotentes
-│   │   └── queries.ts      # Requêtes utilisateurs, paiements, téléchargements et avis
-│   ├── types/              # Types des données persistées
-│   ├── utils/              # Limiteurs, service vidéo, Premium et pages de retour
+│   ├── utils/              # Cache de session, limiteurs et pages de retour
 │   └── public/index.html   # Page d'accueil servie par Express
 └── dist/                   # Sortie générée par `npm run build` (ignorée par Git)
 ```
@@ -88,7 +79,7 @@ existe, détermine directement si le plan est `free` ou `premium`.
 
 - Node.js `>= 18`
 - npm
-- MySQL accessible par l'application
+- API StreamLoaders accessible par le bot
 - Un bot Telegram créé avec BotFather
 - L'URL et le secret du service vidéo distant
 
@@ -109,13 +100,8 @@ Complétez ensuite `.env`. Les variables attendues par le code sont :
 | `PORT` | Port HTTP local, par défaut `3000` |
 | `APP_URL` | URL publique de l'application ; obligatoire en webhook et doit être en HTTPS |
 | `API_URL` | URL de l'API consommée par le bot |
-| `API_SECRET` | Secret utilisé comme clé JWT côté serveur |
 | `TELEGRAM_BOT_TOKEN` | Token du bot Telegram |
-| `DB_HOST`, `DB_PORT` | Hôte et port MySQL |
-| `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Identifiants et base MySQL |
-| `VIDEO_SERVICE_URL` | URL du microservice vidéo |
-| `VIDEO_SERVICE_SECRET` | Secret envoyé dans `X-Service-Secret` |
-| `X_BOT_SECRET` | Secret partagé optionnel entre le bot et l'API |
+| `X_BOT_SECRET` | Secret partagé entre le bot et l'API |
 | `SHAZAM_API_KEY` | Clé RapidAPI, nécessaire pour l'identification musicale |
 | `SHAZAM_API_HOST` | Hôte RapidAPI ; une valeur par défaut est fournie |
 
@@ -143,10 +129,9 @@ TypeScript ne copie pas les fichiers HTML, CSS ou autres fichiers non-TS.
 Au démarrage, l'application :
 
 1. charge la configuration ;
-2. initialise ou met à jour les tables MySQL (`users`, `transactions`,
-   `downloads_log` et `reviews`) ;
-3. démarre Express ;
-4. démarre le bot en polling ou en webhook ;
+2. démarre Express ;
+3. démarre le bot en polling ou en webhook ;
+4. configure le menu natif Telegram ;
 5. monte le health check et le webhook Telegram ;
 6. installe les handlers d'arrêt propre.
 
@@ -197,9 +182,8 @@ etc.) doivent être créés directement sur le serveur avant le premier
 déploiement. Les workflows ne copient jamais les fichiers `.env` locaux et ne
 transmettent pas les secrets de production dans le dépôt.
 Les mises à jour utilisent l'ancien et le nouveau commit de `main`, conservent
-les fichiers cachés du serveur et ne réinitialisent pas la base de données. Le
-démarrage de l'application applique uniquement les créations de tables et
-migrations additives prévues par [`initORM.ts`](./src/database/initORM.ts).
+les fichiers cachés du serveur et ne réinitialisent pas la base de données. La
+base reste gérée par l'API StreamLoaders, pas par ce bot.
 
 ## Branches de travail
 
@@ -222,6 +206,8 @@ partir de `dev`, elle-même créée à partir de `main`.
   il n'est pas vérifié directement par ce processus Node.
 - La liaison Telegram nécessite une clé API valide du compte du site ; un
   identifiant Telegram ne peut être associé qu'à un seul compte.
+- Le bot ne possède plus de connexion MySQL locale : la base, les quotas et
+  les plans sont exclusivement gérés par l'API.
 - Les routes de paiement doivent conserver une validation de webhook côté
   serveur et ne jamais faire confiance aux données envoyées par le navigateur.
 

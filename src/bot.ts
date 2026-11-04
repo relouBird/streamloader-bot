@@ -11,17 +11,10 @@ import TelegramBot, {
   Update,
   BotCommand,
 } from "node-telegram-bot-api";
-import { queries } from "./database/queries";
+import SessionStore from "./utils/sessionStore";
 
 const LOG = "[BOT]";
 
-// ⚠️ Porté depuis bot.js : la valeur y avait été réduite à 4 min (240s)
-// pour les gratuits, contre 15 min (900s) dans la version précédente de
-// ce fichier. Je garde la valeur la plus récente (bot.js), mais vérifie
-// que c'est bien la limite que tu veux — les deux fichiers étaient en
-// désaccord.
-const FREE_MAX_DURATION_SECONDS = 240;
-const FREE_DAILY_DOWNLOAD_LIMIT = 20;
 const LINK_PROMPT =
   "🔐 Envoie ta clé API en réponse à ce message pour lier ton compte.";
 
@@ -30,14 +23,22 @@ const LINK_PROMPT =
 // le double-tap habituel de Telegram (~200-500 ms).
 const TAP_LOCK_TTL_MS = 2 * 60 * 1000;
 
-// Token partagé avec l'API Node : envoyé en en-tête `x-bot-token` sur
-// chaque requête HTTP. Le controller Node peut ainsi identifier les
-// requêtes issues du bot (utile pour des règles de quota spécifiques).
 const BOT_API_TOKEN = process.env.X_BOT_SECRET || "";
 
 const SHAZAM_API_KEY = process.env.SHAZAM_API_KEY || "";
 const SHAZAM_API_HOST =
   process.env.SHAZAM_API_HOST || "shazam-api-free.p.rapidapi.com";
+
+interface AnalyzeResponse {
+  data: {
+    title?: string;
+    duration?: number;
+  };
+}
+
+interface JobResponse {
+  jobId: string;
+}
 
 /**
  * Échappe les caractères HTML critiques lorsqu'on envoie du contenu avec
@@ -62,6 +63,7 @@ export default class Bot {
 
   protected bot: TelegramBot | undefined;
   protected api: AxiosInstance | undefined;
+  protected readonly sessions = new SessionStore();
 
   readonly TMP_DIR = path.join(__dirname, "tmp");
   readonly HOURGLASS = "\u23F3";
@@ -110,10 +112,6 @@ export default class Bot {
     return `/telegram/webhook/${this.webhookUrlToken}`;
   }
 
-  private getLinkedUser(telegramId: number) {
-    return queries.getUserByTelegramId(telegramId);
-  }
-
   // ─────────────────────────────────────────────────────────────────
   //  DÉMARRAGE
   // ─────────────────────────────────────────────────────────────────
@@ -123,7 +121,6 @@ export default class Bot {
       : new TelegramBot(this.token, { polling: true });
 
     this.api = axios.create({ baseURL: this.apiUrl, timeout: 60_000 });
-    this.setupInterceptors();
     this.setupErrorHandlers();
     await this.configureTelegramMenu();
     this.ensureTmpDir();
@@ -150,6 +147,62 @@ export default class Bot {
       menu_button: { type: "commands" },
     });
     console.log(`${LOG} ✅ Menu Telegram natif configuré`);
+  }
+
+  private async createSession(telegramId: number): Promise<string> {
+    if (!BOT_API_TOKEN) throw new Error("X_BOT_SECRET manquant dans .env");
+    const response = await this.api!.post(
+      "/bot/session",
+      { telegramId },
+      { headers: { "x-bot-token": BOT_API_TOKEN } },
+    );
+    const token = response.data?.token;
+    if (typeof token !== "string" || !token) {
+      throw new Error("Réponse de session bot invalide");
+    }
+    this.sessions.set(telegramId, token);
+    return token;
+  }
+
+  private async request<T = unknown>(
+    telegramId: number,
+    config: Parameters<AxiosInstance["request"]>[0],
+    retry = true,
+  ): Promise<AxiosResponse<T>> {
+    const token = this.sessions.get(telegramId) ?? (await this.createSession(telegramId));
+    try {
+      return await this.api!.request<T>({
+        ...config,
+        headers: {
+          ...(config.headers ?? {}),
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch (error) {
+      if (retry && axios.isAxiosError(error) && error.response?.status === 401) {
+        this.sessions.delete(telegramId);
+        return this.request<T>(telegramId, config, false);
+      }
+      throw error;
+    }
+  }
+
+  private async linkAccount(
+    telegramId: number,
+    apiKey: string,
+  ): Promise<{ token: string; user: { email: string; plan: string } | null }> {
+    if (!BOT_API_TOKEN) throw new Error("X_BOT_SECRET manquant dans .env");
+    const response = await this.api!.post(
+      "/bot/link",
+      { telegramId, apiKey },
+      { headers: { "x-bot-token": BOT_API_TOKEN } },
+    );
+    const token = response.data?.token;
+    if (typeof token !== "string" || !token) {
+      throw new Error("Réponse de liaison bot invalide");
+    }
+    this.sessions.set(telegramId, token);
+    return { token, user: response.data?.user ?? null };
   }
 
   private async registerWebhook() {
@@ -192,39 +245,6 @@ export default class Bot {
   // ─────────────────────────────────────────────────────────────────
   //  SETUP INTERNE
   // ─────────────────────────────────────────────────────────────────
-  private setupInterceptors() {
-    this.api!.interceptors.request.use((config) => {
-      // Identifie les requêtes comme provenant du bot. Le controller
-      // Node peut ainsi distinguer un appel bot d'un appel site web
-      // (`x-bot-token` comparé à `ENV.X_BOT_SECRET`).
-      if (BOT_API_TOKEN) {
-        config.headers = config.headers ?? {};
-        (config.headers as Record<string, string>)["x-bot-token"] =
-          BOT_API_TOKEN;
-      }
-      console.log(
-        `${LOG} → ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`,
-        config.params ? { params: config.params } : "",
-      );
-      return config;
-    });
-    this.api!.interceptors.response.use(
-      (response) => {
-        console.log(
-          `${LOG} ← ${response.status} ${response.config.url} — ${response.headers["content-type"]}`,
-        );
-        return response;
-      },
-      (error) => {
-        console.error(
-          `${LOG} ❌ ${error.config?.method?.toUpperCase()} ${error.config?.url} → ${error.response?.status ?? "NO RESPONSE"}`,
-          error.response?.data ?? error.message,
-        );
-        return Promise.reject(error);
-      },
-    );
-  }
-
   private setupErrorHandlers() {
     this.bot?.on("polling_error", (err) =>
       console.error(`${LOG} ❌ polling_error:`, err.message),
@@ -414,7 +434,7 @@ export default class Bot {
           `1️⃣ Envoie-moi un lien de vidéo\n` +
           `2️⃣ Choisis le format (Vidéo HD, Audio MP3, ou Musique Officielle)\n` +
           `3️⃣ Attends la fin du téléchargement\n\n` +
-          `⚠️ Limite gratuite : ${Math.round(FREE_MAX_DURATION_SECONDS / 60)} minutes par vidéo, ${FREE_DAILY_DOWNLOAD_LIMIT} téléchargements/jour.`,
+          `Les limites et autorisations sont vérifiées automatiquement par le service StreamLoaders.`,
         { parse_mode: "Markdown" },
       );
     });
@@ -438,20 +458,16 @@ export default class Bot {
           return void this.safeSend(chatId, "❌ Cette clé API semble invalide.");
         }
         try {
-          const apiKeyHash = crypto
-            .createHash("sha256")
-            .update(apiKey)
-            .digest("hex");
-          const user = await queries.linkTelegramAccount(apiKeyHash, chatId);
-          if (!user) {
-            return void this.safeSend(
-              chatId,
-              "❌ Clé API invalide ou compte déjà lié à un autre Telegram.",
-            );
+          if (msg.chat.type !== "private") {
+            return void this.safeSend(chatId, "❌ La liaison est disponible en message privé uniquement.");
           }
+          const result = await this.linkAccount(chatId, apiKey);
+          const user = result.user;
           return void this.safeSend(
             chatId,
-            `✅ Compte lié : *${escapeHtml(user.email)}*\nPlan actuel : *${user.plan}*.`,
+            user
+              ? `✅ Compte lié : *${escapeHtml(user.email)}*`
+              : "✅ Compte Telegram lié.",
             { parse_mode: "Markdown" },
           );
         } catch (error) {
@@ -478,7 +494,9 @@ export default class Bot {
 
       let data: any;
       try {
-        const res = await this.api?.get("/media/analyze", {
+        const res = await this.request<AnalyzeResponse>(msg.from?.id ?? chatId, {
+          method: "GET",
+          url: "/bot/media/analyze",
           params: { url: text },
         });
         data = res?.data?.data;
@@ -491,22 +509,6 @@ export default class Bot {
       }
 
       const duration = data.duration || 0;
-      const user = msg.from?.id
-        ? await this.getLinkedUser(msg.from.id)
-        : null;
-      const isPremium = user?.plan === "premium";
-
-      if (!isPremium && duration > FREE_MAX_DURATION_SECONDS) {
-        const minutes = Math.ceil(duration / 60);
-        await this.safeDelete(chatId, analyzingMsg.message_id);
-        return void this.safeSend(
-          chatId,
-          `⚠️ *Vidéo trop longue (${minutes} min)*\n\n` +
-            `Le plan gratuit limite les téléchargements à ${Math.round(FREE_MAX_DURATION_SECONDS / 60)} minutes maximum.\n` +
-            `Passe au plan *Premium* sur notre site pour débloquer les vidéos illimitées ! ⚡`,
-          { parse_mode: "Markdown" },
-        );
-      }
 
       // L'URL est embarquée dans le message sous forme de lien caché sur
       // le titre. Le bouton ne transporte plus qu'un id court (la durée
@@ -614,30 +616,6 @@ export default class Bot {
       const duration = Number(durationRaw) || 0;
       const isAudio = type === "aud" || type === "music";
 
-      const user = await this.getLinkedUser(query.from.id);
-      const isPremium = user?.plan === "premium";
-      if (!isPremium) {
-        try {
-          const quota = await queries.consumeDailyDownload(
-            query.from.id,
-            user?.id ?? null,
-            FREE_DAILY_DOWNLOAD_LIMIT,
-          );
-          if (!quota.allowed) {
-            return this.safeAnswerCallback(query.id, {
-              text: `Limite gratuite de ${FREE_DAILY_DOWNLOAD_LIMIT} téléchargements atteinte aujourd'hui.`,
-              show_alert: true,
-            });
-          }
-        } catch (error) {
-          console.error(`${LOG} ❌ quota quotidien :`, (error as Error).message);
-          return this.safeAnswerCallback(query.id, {
-            text: "Quota indisponible, réessaie dans un instant.",
-            show_alert: true,
-          });
-        }
-      }
-
       await this.safeAnswerCallback(query.id, {
         text:
           type === "music"
@@ -662,6 +640,7 @@ export default class Bot {
 
       if (type === "music") {
         const identified = await this.identifyMusic(
+          query.from.id,
           url,
           videoTitle,
           duration,
@@ -682,26 +661,27 @@ export default class Bot {
         if (type === "music" && musicTags) {
           // Endpoint dédié — pas besoin de faire transiter une recherche
           // ytsearch1:... par le champ `url` générique de /download/start.
-          const res: AxiosResponse = (await this.api?.post(
-            "/media/music/start",
-            {
+          const res = await this.request<JobResponse>(query.from.id, {
+            method: "POST",
+            url: "/bot/media/music/start",
+            data: {
               query: `${musicTags.artist ? musicTags.artist + " " : ""}${musicTags.title} official audio`,
               title: musicTags.title,
               artist: musicTags.artist,
               coverUrl: musicTags.coverUrl,
             },
-          )) as AxiosResponse;
+          });
           jobId = res.data.jobId;
         } else {
-          const res: AxiosResponse = (await this.api?.post(
-            "/media/download/start",
-            {
+          const res = await this.request<JobResponse>(query.from.id, {
+            method: "POST",
+            url: "/bot/media/download/start",
+            data: {
               url,
-              provider: "bot",
               quality: isAudio ? "audio" : "1080p",
               title: "video",
             },
-          )) as AxiosResponse;
+          });
           jobId = res.data.jobId;
         }
       } catch (e) {
@@ -715,7 +695,7 @@ export default class Bot {
       let lastPercentShown = -1;
 
       try {
-        await this.followProgress(jobId, (percent) => {
+        await this.followProgress(query.from.id, jobId, (percent) => {
           const rounded = Math.round(percent);
           if (editing || rounded === lastPercentShown) return;
           editing = true;
@@ -744,7 +724,9 @@ export default class Bot {
 
       const ext = isAudio ? "mp3" : "mp4";
       try {
-        const fileRes = await this.api?.get(`/media/file/${jobId}`, {
+        const fileRes = await this.request<NodeJS.ReadableStream>(query.from.id, {
+          method: "GET",
+          url: `/bot/media/file/${jobId}`,
           responseType: "stream",
         });
         const filename = `${jobId}.${ext}`;
@@ -787,6 +769,7 @@ export default class Bot {
    * envoyé à l'utilisateur dans ce cas).
    */
   private async identifyMusic(
+    telegramId: number,
     url: string,
     videoTitle: string,
     duration: number,
@@ -808,23 +791,29 @@ export default class Bot {
     let coverUrl: string | null = null;
 
     try {
-      const startRes = await this.api?.post("/media/download/start", {
-        url,
-        quality: "audio",
-        trim: true,
-        startTime: toTimestamp(snippetStart),
-        endTime: toTimestamp(snippetEnd),
-        title: "snippet",
+      const startRes = await this.request<JobResponse>(telegramId, {
+        method: "POST",
+        url: "/bot/media/download/start",
+        data: {
+          url,
+          quality: "audio",
+          trim: true,
+          startTime: toTimestamp(snippetStart),
+          endTime: toTimestamp(snippetEnd),
+          title: "snippet",
+        },
       });
       const snippetJobId = startRes?.data?.jobId;
 
-      await this.followProgress(snippetJobId, () => {}); // pas de suivi visuel pour ce job jetable
+      await this.followProgress(telegramId, snippetJobId, () => {}); // pas de suivi visuel pour ce job jetable
 
       const snippetPath = path.join(
         this.TMP_DIR,
         `${snippetJobId}_snippet.mp3`,
       );
-      const fileRes = await this.api?.get(`/media/file/${snippetJobId}`, {
+      const fileRes = await this.request<NodeJS.ReadableStream>(telegramId, {
+        method: "GET",
+        url: `/bot/media/file/${snippetJobId}`,
         responseType: "stream",
       });
       await new Promise<void>((resolve, reject) => {
@@ -880,10 +869,15 @@ export default class Bot {
     return { title: track, artist, coverUrl };
   }
 
-  followProgress(jobId: string, onProgress: (percent: number) => void) {
+  followProgress(
+    telegramId: number,
+    jobId: string,
+    onProgress: (percent: number) => void,
+  ) {
     return new Promise((resolve, reject) => {
-      this.api
-        ?.get(`/media/progress/${jobId}`, {
+      this.request<NodeJS.ReadableStream>(telegramId, {
+          method: "GET",
+          url: `/bot/media/progress/${jobId}`,
           responseType: "stream",
           headers: { Accept: "text/event-stream" },
         })
