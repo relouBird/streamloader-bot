@@ -27,7 +27,7 @@ jobs:
           script: |
             set -e
 
-            APP_DIR="$HOME/bot-test"
+            APP_DIR="$HOME/testbot"
             REPOSITORY="https://github.com/relouBird/streamloader-bot.git"
             BRANCH="test"
             NODE_ENV_ACTIVATE="$HOME/nodevenv/testbot/24/bin/activate"
