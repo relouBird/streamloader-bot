@@ -59,6 +59,10 @@ et reçoit les webhooks Telegram en production.
 - Liaison d'un compte Telegram à un compte du site via une clé API.
 - Nettoyage périodique des fichiers temporaires et arrêt propre du processus.
 
+Le registre local du compteur conserve l'identifiant Telegram, le prénom et le
+nom d'utilisateur facultatif. Il est ignoré par Git, n'est pas transmis à
+l'API et n'est pas partagé entre plusieurs instances du bot.
+
 Le quota quotidien est associé à l'identifiant Telegram et à la date du jour
 dans la table `daily_download_limits`. Le compte utilisateur lié, lorsqu'il
 existe, détermine directement si le plan est `free` ou `premium`.
@@ -77,8 +81,10 @@ existe, détermine directement si le plan est `free` ou `premium`.
 │   ├── index.ts            # Bootstrap de l'application
 │   ├── bot.ts              # Client et handlers Telegram
 │   ├── server.ts           # Serveur Express et webhook
-│   ├── config/env.ts       # Lecture de la configuration
-│   ├── utils/              # Cache de session, limiteurs et pages de retour
+│   ├── config/             # Configuration de l'environnement et du bot
+│   ├── stores/             # Cache de session et registre local des utilisateurs
+│   ├── utils/              # Limiteurs et pages de retour
+│   ├── assets/             # Images du profil et du message de bienvenue
 │   └── public/index.html   # Page d'accueil servie par Express
 └── dist/                   # Sortie générée par `npm run build` (ignorée par Git)
 ```
@@ -159,8 +165,9 @@ npm run dev
 ```
 
 La commande `npm run build` compile TypeScript puis copie les assets statiques
-de `src/public/` vers `dist/public/`. Cette seconde étape est nécessaire car
-TypeScript ne copie pas les fichiers HTML, CSS ou autres fichiers non-TS.
+de `src/public/` vers `dist/public/` et les images de `src/assets/` vers
+`dist/assets/`. Cette seconde étape est nécessaire car TypeScript ne copie pas
+les fichiers non-TS.
 
 Au démarrage, l'application :
 
@@ -213,7 +220,7 @@ Le déploiement PlanetHoster est décrit par deux workflows GitHub Actions :
 - [`first-deployment.yml`](./.github/workflows/first-deployment.yml) initialise
   manuellement une nouvelle installation ;
 - [`test.yml`](./.github/workflows/test.yml) déploie automatiquement chaque
-  push sur `test` dans `$HOME/bot-test` ;
+  push sur `test` dans `$HOME/testbot` ;
 - [`init-test-deployment.yml`](./.github/workflows/init-test-deployment.yml)
   initialise manuellement cet environnement de test isolé.
 
@@ -221,10 +228,10 @@ Les fichiers de configuration (`.env`, `.env.*`, `.htaccess`, etc.) doivent
 être créés directement sur le serveur avant le déploiement. Les workflows ne
 copient jamais les fichiers `.env` locaux et ne transmettent pas les secrets
 dans le dépôt. Avant d'exécuter `init-test-deployment.yml`, créez
-`$HOME/bot-test/.env` et configurez-y un token Telegram, une URL publique, un
+`$HOME/testbot/.env` et configurez-y un token Telegram, une URL publique, un
 port et une configuration API adaptés au test. Configurez aussi
 l'environnement et l'application Node CloudLinux dédiés
-`$HOME/nodevenv/bot-test/22` et `$HOME/bot-test`. Ne réutilisez pas le token
+`$HOME/nodevenv/testbot/24` et `$HOME/testbot`. Ne réutilisez pas le token
 Telegram de production : Telegram n'autorise qu'un seul webhook par bot.
 Les workflows de test utilisent les mêmes secrets SSH GitHub, mais un verrou
 de déploiement distinct.
@@ -241,8 +248,8 @@ La hiérarchie de branches prévue pour ce projet est :
 
 ```text
 main
-└── dev
-    └── test
+└── test
+    └── dev
 ```
 
 Le flux de validation prévu est `dev` → `test` → `main` : fusionnez d'abord

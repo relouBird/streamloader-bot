@@ -70,6 +70,11 @@ jobs:
             npm run build
             test -f "$APP_DIR/dist/index.js"
 
+            # Keep documentation in Git but out of the production app directory.
+            find "$APP_DIR" -type f -iname '*.md' \
+              -not -path "$APP_DIR/.git/*" \
+              -print -delete
+
             # The bot does not initialize or reset the API database.
             /usr/sbin/cloudlinux-selector restart \
               --json \
