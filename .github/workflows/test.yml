@@ -1,0 +1,95 @@
+name: Deploy test
+
+on:
+  push:
+    branches:
+      - test
+  workflow_dispatch:
+
+concurrency:
+  group: planethoster-bot-test
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy test revision
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy through SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_SSH_PORT || 5022 }}
+          script_stop: true
+          script: |
+            set -e
+
+            APP_DIR="$HOME/testbot"
+            REPOSITORY="https://github.com/relouBird/streamloader-bot.git"
+            BRANCH="test"
+            NODE_ENV_ACTIVATE="$HOME/nodevenv/testbot/24/bin/activate"
+            ENV_FILE="$APP_DIR/.env"
+            DEPLOY_LOCK="$HOME/.streamloaders-testbot-deploy.lock"
+
+            if [ ! -f "$NODE_ENV_ACTIVATE" ]; then
+              echo "ERROR: Node environment not found: $NODE_ENV_ACTIVATE"
+              exit 1
+            fi
+
+            # CloudLinux's activation script reads optional unset variables.
+            # Load it before enabling Bash nounset for the deployment itself.
+            source "$NODE_ENV_ACTIVATE"
+            set -u
+
+            if [ ! -d "$APP_DIR/.git" ]; then
+              echo "ERROR: Test deployment is not initialized. Run the init-test-deployment workflow first."
+              exit 1
+            fi
+
+            if [ ! -f "$ENV_FILE" ]; then
+              echo "ERROR: Test .env is missing: $ENV_FILE"
+              exit 1
+            fi
+
+            if ! ( set -o noclobber; mkdir "$DEPLOY_LOCK" ) 2>/dev/null; then
+              echo "ERROR: Another bot test deployment is already running."
+              exit 1
+            fi
+            trap 'rmdir "$DEPLOY_LOCK"' EXIT
+
+            cd "$APP_DIR"
+            CURRENT_SHA="$(git rev-parse HEAD)"
+            git fetch --prune origin "$BRANCH"
+            TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+
+            if [ "$CURRENT_SHA" = "$TARGET_SHA" ]; then
+              echo "Already deployed: $TARGET_SHA"
+              exit 0
+            fi
+
+            echo "Changes between $CURRENT_SHA and $TARGET_SHA:"
+            git diff --name-status "$CURRENT_SHA" "$TARGET_SHA"
+
+            # .env is server-side configuration and is never reset or copied.
+            git reset --hard "$TARGET_SHA"
+            # Keep all server-side dotfiles (.env*, .htaccess, etc.).
+            git clean -fd -e '.*'
+
+            npm ci --include=dev
+            npm run build
+            test -f "$APP_DIR/dist/index.js"
+
+            # Keep documentation in Git but out of the test app directory.
+            find "$APP_DIR" -type f -iname '*.md' \
+              -not -path "$APP_DIR/.git/*" \
+              -print -delete
+
+            /usr/sbin/cloudlinux-selector restart \
+              --json \
+              --interpreter=nodejs \
+              --app-root="$APP_DIR"
+
+            echo "Test deployment successful: $TARGET_SHA"
