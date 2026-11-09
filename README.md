@@ -59,6 +59,10 @@ et reçoit les webhooks Telegram en production.
 - Liaison d'un compte Telegram à un compte du site via une clé API.
 - Nettoyage périodique des fichiers temporaires et arrêt propre du processus.
 
+Le registre local du compteur conserve l'identifiant Telegram, le prénom et le
+nom d'utilisateur facultatif. Il est ignoré par Git, n'est pas transmis à
+l'API et n'est pas partagé entre plusieurs instances du bot.
+
 Le quota quotidien est associé à l'identifiant Telegram et à la date du jour
 dans la table `daily_download_limits`. Le compte utilisateur lié, lorsqu'il
 existe, détermine directement si le plan est `free` ou `premium`.
@@ -77,8 +81,10 @@ existe, détermine directement si le plan est `free` ou `premium`.
 │   ├── index.ts            # Bootstrap de l'application
 │   ├── bot.ts              # Client et handlers Telegram
 │   ├── server.ts           # Serveur Express et webhook
-│   ├── config/env.ts       # Lecture de la configuration
-│   ├── utils/              # Cache de session, limiteurs et pages de retour
+│   ├── config/             # Configuration de l'environnement et du bot
+│   ├── stores/             # Cache de session et registre local des utilisateurs
+│   ├── utils/              # Limiteurs et pages de retour
+│   ├── assets/             # Images du profil et du message de bienvenue
 │   └── public/index.html   # Page d'accueil servie par Express
 └── dist/                   # Sortie générée par `npm run build` (ignorée par Git)
 ```
@@ -159,8 +165,9 @@ npm run dev
 ```
 
 La commande `npm run build` compile TypeScript puis copie les assets statiques
-de `src/public/` vers `dist/public/`. Cette seconde étape est nécessaire car
-TypeScript ne copie pas les fichiers HTML, CSS ou autres fichiers non-TS.
+de `src/public/` vers `dist/public/` et les images de `src/assets/` vers
+`dist/assets/`. Cette seconde étape est nécessaire car TypeScript ne copie pas
+les fichiers non-TS.
 
 Au démarrage, l'application :
 
@@ -220,6 +227,8 @@ transmettent pas les secrets de production dans le dépôt.
 Les mises à jour utilisent l'ancien et le nouveau commit de `main`, conservent
 les fichiers cachés du serveur et ne réinitialisent pas la base de données. La
 base reste gérée par l'API StreamLoaders, pas par ce bot.
+Les fichiers Markdown restent suivis dans Git, mais sont retirés du répertoire
+de production après le build.
 
 ## Branches de travail
 
@@ -228,11 +237,11 @@ La hiérarchie de branches prévue pour ce projet est :
 ```text
 main
 └── dev
-    └── sync-process
+    └── testbot-port
 ```
 
-Les changements de cette session sont réalisés sur `sync-process`, créée à
-partir de `dev`, elle-même créée à partir de `main`.
+Les changements de portage du testbot sont réalisés sur `testbot-port`, créée
+à partir de `dev`, elle-même créée à partir de `main`.
 
 ## Points d'attention
 

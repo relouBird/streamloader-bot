@@ -9,9 +9,11 @@ import TelegramBot, {
   Message,
   SendMessageParams,
   Update,
-  BotCommand,
 } from "node-telegram-bot-api";
-import SessionStore from "./utils/sessionStore";
+import { BOT_CONFIG } from "./config/bot";
+import ENV from "./config/env";
+import SessionStore from "./stores/sessionStore";
+import UserStore from "./stores/userStore";
 
 const LOG = "[BOT]";
 
@@ -40,6 +42,11 @@ interface JobResponse {
   jobId: string;
 }
 
+interface SiteOfferResponse {
+  showSupportButton: boolean;
+  redirectToken?: string;
+}
+
 /**
  * Échappe les caractères HTML critiques lorsqu'on envoie du contenu avec
  * `parse_mode: "HTML"`. Évite qu'un titre de vidéo contenant `<`, `>`, `&`
@@ -64,6 +71,7 @@ export default class Bot {
   protected bot: TelegramBot | undefined;
   protected api: AxiosInstance | undefined;
   protected readonly sessions = new SessionStore();
+  protected readonly users = new UserStore();
 
   readonly TMP_DIR = path.join(__dirname, "tmp");
   readonly HOURGLASS = "\u23F3";
@@ -122,7 +130,10 @@ export default class Bot {
 
     this.api = axios.create({ baseURL: this.apiUrl, timeout: 60_000 });
     this.setupErrorHandlers();
-    await this.configureTelegramMenu();
+    void this.configureTelegramMenu().catch((error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`${LOG} ❌ Configuration Telegram interrompue :`, detail);
+    });
     this.ensureTmpDir();
 
     if (this.useWebhook) {
@@ -136,17 +147,138 @@ export default class Bot {
   }
 
   private async configureTelegramMenu(): Promise<void> {
-    const commands: BotCommand[] = [
-      { command: "start", description: "Démarrer le bot" },
-      { command: "help", description: "Afficher l'aide" },
-      { command: "link", description: "Lier mon compte avec une clé API" },
-    ];
+    if (!this.bot) throw new Error("Bot Telegram non initialisé");
 
-    await this.bot?.setMyCommands(commands);
-    await this.bot?.setChatMenuButton({
-      menu_button: { type: "commands" },
+    await this.configureTelegramSetting("nom", () =>
+      this.bot!.setMyName({ name: BOT_CONFIG.name }),
+    );
+    await this.configureTelegramSetting("description", () =>
+      this.bot!.setMyDescription({ description: BOT_CONFIG.description }),
+    );
+    await this.configureTelegramSetting("description courte", () =>
+      this.bot!.setMyShortDescription({
+        short_description: BOT_CONFIG.shortDescription,
+      }),
+    );
+    await this.configureTelegramSetting("commandes", () =>
+      this.bot!.setMyCommands(BOT_CONFIG.commands),
+    );
+    await this.configureTelegramSetting("bouton de menu", () =>
+      this.bot!.setChatMenuButton({ menu_button: BOT_CONFIG.menuButton }),
+    );
+
+    if (BOT_CONFIG.profilePhotoPath) {
+      if (!fs.existsSync(BOT_CONFIG.profilePhotoPath)) {
+        console.error(
+          `${LOG} ❌ Photo de profil Telegram introuvable : ${BOT_CONFIG.profilePhotoPath}`,
+        );
+      } else {
+        await this.configureTelegramSetting("photo de profil", () =>
+          this.bot!.setMyProfilePhoto({
+            type: "static",
+            photo: BOT_CONFIG.profilePhotoPath,
+          }),
+        );
+      }
+    }
+
+    console.log(`${LOG} ✅ Identité et menu Telegram configurés`);
+  }
+
+  private async configureTelegramSetting(
+    setting: string,
+    operation: () => Promise<unknown>,
+  ): Promise<void> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        operation(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("délai dépassé après 15 secondes")),
+            15_000,
+          );
+          timeout.unref();
+        }),
+      ]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(
+        `${LOG} ⚠️ Configuration Telegram ignorée (${setting}) :`,
+        detail,
+      );
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private async sendWelcomeMessage(
+    chatId: number,
+    text: string,
+  ): Promise<void> {
+    if (BOT_CONFIG.welcomePhotoPath) {
+      try {
+        await this.bot?.sendPhoto(chatId, BOT_CONFIG.welcomePhotoPath, {
+          caption: text,
+          parse_mode: "Markdown",
+        });
+        return;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(
+          `${LOG} ❌ Photo de bienvenue impossible (chatId=${chatId}):`,
+          detail,
+        );
+      }
+    }
+    await this.safeSend(chatId, text, { parse_mode: "Markdown" });
+  }
+
+  private async sendSiteOffer(
+    telegramId: number,
+    chatId: number,
+  ): Promise<void> {
+    if (!ENV.TELEGRAM_SITE_OFFER_ENABLED || !ENV.SITE_URL) return;
+
+    try {
+      const response = await this.request<SiteOfferResponse>(telegramId, {
+        method: "POST",
+        url: "/bot/site-offer",
+        data: { source: "telegram_bot" },
+      });
+      const offer = response.data;
+      if (!offer.showSupportButton || !offer.redirectToken) return;
+
+      const url = `${ENV.SITE_URL}/from-telegram?t=${encodeURIComponent(
+        offer.redirectToken,
+      )}`;
+      await this.safeSend(
+        chatId,
+        "🎬 Ton téléchargement est terminé.\n\n" +
+          "Tu peux visiter StreamLoaders pour découvrir les nouveautés et soutenir le service.",
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "🌐 Visiter StreamLoaders", url }]],
+          },
+        },
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `${LOG} ⚠️ Offre site indisponible (téléchargement conservé) :`,
+        detail,
+      );
+    }
+  }
+
+  private registerUser(msg: Message): number {
+    if (msg.chat.type !== "private" || !msg.from) return this.users.count();
+    return this.users.add({
+      userId: msg.from.id,
+      firstName: msg.from.first_name || "Utilisateur",
+      username: msg.from.username,
+      joinedAt: new Date().toISOString(),
     });
-    console.log(`${LOG} ✅ Menu Telegram natif configuré`);
   }
 
   private async createSession(telegramId: number): Promise<string> {
@@ -416,14 +548,16 @@ export default class Bot {
   //  HANDLERS
   // ─────────────────────────────────────────────────────────────────
   startBot() {
-    this.bot?.onText(/\/start/, (msg) => {
+    this.bot?.onText(/^\/start(?:@\w+)?(?:\s|$)/, async (msg) => {
+      const totalUsers = this.registerUser(msg);
       console.log("Nouveau /start de " + msg.chat.username);
-      this.safeSend(
+      await this.sendWelcomeMessage(
         msg.chat.id,
-        `👋 Salut ! Bienvenue sur *StreamLoaders Bot* 🚀\n\n` +
+        `👋 Salut ! Bienvenue sur *${BOT_CONFIG.welcomeTitle}* 🚀\n\n` +
           `Envoie-moi le lien d'une vidéo (YouTube, TikTok, Instagram...) et télécharge-la instantanément.\n\n` +
-          `💡 Les membres Premium du site profitent de téléchargements illimités et sans restriction de durée !`,
-        { parse_mode: "Markdown" },
+          `💡 Les membres Premium du site profitent de téléchargements illimités et sans restriction de durée !\n\n` +
+          `👥 *${totalUsers.toLocaleString("fr-FR")}* utilisateurs utilisent déjà ce bot.\n\n` +
+          BOT_CONFIG.welcomeText,
       );
     });
 
@@ -448,6 +582,7 @@ export default class Bot {
 
   getMessage() {
     this.bot?.on("message", async (msg) => {
+      this.registerUser(msg);
       const chatId = msg.chat.id;
       const text = msg.text;
       if (!text || text.startsWith("/")) return;
@@ -751,7 +886,9 @@ export default class Bot {
           chatId,
           "❌ Erreur : le fichier est peut-être trop lourd pour Telegram (max 50 Mo en natif), ou une erreur réseau est survenue.",
         );
+        return;
       }
+      await this.sendSiteOffer(query.from.id, chatId);
     });
   }
 
