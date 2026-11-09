@@ -10,8 +10,12 @@ import TelegramBot, {
   SendMessageParams,
   Update,
 } from "node-telegram-bot-api";
+
+// Configurations
 import { BOT_CONFIG } from "./config/bot";
 import ENV from "./config/env";
+
+// Stores
 import SessionStore from "./stores/sessionStore";
 import UserStore from "./stores/userStore";
 
@@ -45,6 +49,7 @@ interface JobResponse {
 interface SiteOfferResponse {
   showSupportButton: boolean;
   redirectToken?: string;
+  nextEligibleAt?: string;
 }
 
 /**
@@ -131,8 +136,10 @@ export default class Bot {
     this.api = axios.create({ baseURL: this.apiUrl, timeout: 60_000 });
     this.setupErrorHandlers();
     void this.configureTelegramMenu().catch((error: unknown) => {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.error(`${LOG} ❌ Configuration Telegram interrompue :`, detail);
+      console.error(
+        `${LOG} ❌ Configuration Telegram interrompue :`,
+        (error as Error).message,
+      );
     });
     this.ensureTmpDir();
 
@@ -143,18 +150,21 @@ export default class Bot {
     }
 
     console.log(LOG + " API URL : " + this.apiUrl);
-    console.log(LOG + " 🤖 Bot Telegram StreamLoaders démarré — mode API");
+    console.log(LOG + " 🤖 Bot Telegram StreamLoaders Test démarré — mode API");
   }
 
   private async configureTelegramMenu(): Promise<void> {
     if (!this.bot) throw new Error("Bot Telegram non initialisé");
 
+    // [COPILOT] Controle un peu ici
     await this.configureTelegramSetting("nom", () =>
       this.bot!.setMyName({ name: BOT_CONFIG.name }),
     );
+
     await this.configureTelegramSetting("description", () =>
       this.bot!.setMyDescription({ description: BOT_CONFIG.description }),
     );
+
     await this.configureTelegramSetting("description courte", () =>
       this.bot!.setMyShortDescription({
         short_description: BOT_CONFIG.shortDescription,
@@ -189,26 +199,21 @@ export default class Bot {
     setting: string,
     operation: () => Promise<unknown>,
   ): Promise<void> {
-    let timeout: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
         operation(),
         new Promise<never>((_, reject) => {
-          timeout = setTimeout(
+          setTimeout(
             () => reject(new Error("délai dépassé après 15 secondes")),
             15_000,
           );
-          timeout.unref();
         }),
       ]);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
       console.error(
         `${LOG} ⚠️ Configuration Telegram ignorée (${setting}) :`,
-        detail,
+        (error as Error).message,
       );
-    } finally {
-      if (timeout) clearTimeout(timeout);
     }
   }
 
@@ -224,10 +229,9 @@ export default class Bot {
         });
         return;
       } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
         console.error(
           `${LOG} ❌ Photo de bienvenue impossible (chatId=${chatId}):`,
-          detail,
+          (error as Error).message,
         );
       }
     }
@@ -263,10 +267,9 @@ export default class Bot {
         },
       );
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
       console.warn(
         `${LOG} ⚠️ Offre site indisponible (téléchargement conservé) :`,
-        detail,
+        (error as Error).message,
       );
     }
   }
@@ -301,7 +304,8 @@ export default class Bot {
     config: Parameters<AxiosInstance["request"]>[0],
     retry = true,
   ): Promise<AxiosResponse<T>> {
-    const token = this.sessions.get(telegramId) ?? (await this.createSession(telegramId));
+    const token =
+      this.sessions.get(telegramId) ?? (await this.createSession(telegramId));
     try {
       return await this.api!.request<T>({
         ...config,
@@ -311,7 +315,11 @@ export default class Bot {
         },
       });
     } catch (error) {
-      if (retry && axios.isAxiosError(error) && error.response?.status === 401) {
+      if (
+        retry &&
+        axios.isAxiosError(error) &&
+        error.response?.status === 401
+      ) {
         this.sessions.delete(telegramId);
         return this.request<T>(telegramId, config, false);
       }
@@ -548,7 +556,7 @@ export default class Bot {
   //  HANDLERS
   // ─────────────────────────────────────────────────────────────────
   startBot() {
-    this.bot?.onText(/^\/start(?:@\w+)?(?:\s|$)/, async (msg) => {
+    this.bot?.onText(/\/start(?:@\w+)?/, async (msg) => {
       const totalUsers = this.registerUser(msg);
       console.log("Nouveau /start de " + msg.chat.username);
       await this.sendWelcomeMessage(
@@ -568,7 +576,7 @@ export default class Bot {
           `1️⃣ Envoie-moi un lien de vidéo\n` +
           `2️⃣ Choisis le format (Vidéo HD, Audio MP3, ou Musique Officielle)\n` +
           `3️⃣ Attends la fin du téléchargement\n\n` +
-          `Les limites et autorisations sont vérifiées automatiquement par le service StreamLoaders.`,
+          `Les limites et autorisations sont vérifiées automatiquement par le service Test StreamLoaders.`,
         { parse_mode: "Markdown" },
       );
     });
@@ -590,11 +598,17 @@ export default class Bot {
       if (msg.reply_to_message?.text === LINK_PROMPT) {
         const apiKey = text.trim();
         if (apiKey.length < 16 || apiKey.length > 255) {
-          return void this.safeSend(chatId, "❌ Cette clé API semble invalide.");
+          return void this.safeSend(
+            chatId,
+            "❌ Cette clé API semble invalide.",
+          );
         }
         try {
           if (msg.chat.type !== "private") {
-            return void this.safeSend(chatId, "❌ La liaison est disponible en message privé uniquement.");
+            return void this.safeSend(
+              chatId,
+              "❌ La liaison est disponible en message privé uniquement.",
+            );
           }
           const result = await this.linkAccount(chatId, apiKey);
           const user = result.user;
@@ -606,7 +620,10 @@ export default class Bot {
             { parse_mode: "Markdown" },
           );
         } catch (error) {
-          console.error(`${LOG} ❌ liaison Telegram :`, (error as Error).message);
+          console.error(
+            `${LOG} ❌ liaison Telegram :`,
+            (error as Error).message,
+          );
           return void this.safeSend(
             chatId,
             "❌ Impossible de lier le compte pour le moment.",
@@ -629,11 +646,14 @@ export default class Bot {
 
       let data: any;
       try {
-        const res = await this.request<AnalyzeResponse>(msg.from?.id ?? chatId, {
-          method: "GET",
-          url: "/bot/media/analyze",
-          params: { url: text },
-        });
+        const res = await this.request<AnalyzeResponse>(
+          msg.from?.id ?? chatId,
+          {
+            method: "GET",
+            url: "/bot/media/analyze",
+            params: { url: text },
+          },
+        );
         data = res?.data?.data;
         if (!data) throw new Error("Réponse API sans données exploitables.");
       } catch (e) {
@@ -704,11 +724,17 @@ export default class Bot {
       // Telegram nous renvoie le message complet à chaque callback, avec
       // la liste d'entités — dont notre lien caché de type "text_link".
       const message = query.message;
-      const messageText = message && "text" in message ? message.text : undefined;
+      const messageText =
+        message && "text" in message ? message.text : undefined;
       const linkEntity =
         message && "entities" in message
           ? (message.entities?.find((e) => e.type === "text_link") as
-              | { type: "text_link"; offset: number; length: number; url: string }
+              | {
+                  type: "text_link";
+                  offset: number;
+                  length: number;
+                  url: string;
+                }
               | undefined)
           : undefined;
 
@@ -859,11 +885,14 @@ export default class Bot {
 
       const ext = isAudio ? "mp3" : "mp4";
       try {
-        const fileRes = await this.request<NodeJS.ReadableStream>(query.from.id, {
-          method: "GET",
-          url: `/bot/media/file/${jobId}`,
-          responseType: "stream",
-        });
+        const fileRes = await this.request<NodeJS.ReadableStream>(
+          query.from.id,
+          {
+            method: "GET",
+            url: `/bot/media/file/${jobId}`,
+            responseType: "stream",
+          },
+        );
         const filename = `${jobId}.${ext}`;
 
         if (isAudio) {
@@ -877,6 +906,8 @@ export default class Bot {
           );
         }
         await this.safeDelete(chatId, statusMsg.message_id);
+
+        await this.sendSiteOffer(query.from.id, chatId);
       } catch (e) {
         console.error(
           `${LOG} ❌ envoi fichier jobId=${jobId} :`,
@@ -886,9 +917,7 @@ export default class Bot {
           chatId,
           "❌ Erreur : le fichier est peut-être trop lourd pour Telegram (max 50 Mo en natif), ou une erreur réseau est survenue.",
         );
-        return;
       }
-      await this.sendSiteOffer(query.from.id, chatId);
     });
   }
 
@@ -1013,11 +1042,11 @@ export default class Bot {
   ) {
     return new Promise((resolve, reject) => {
       this.request<NodeJS.ReadableStream>(telegramId, {
-          method: "GET",
-          url: `/bot/media/progress/${jobId}`,
-          responseType: "stream",
-          headers: { Accept: "text/event-stream" },
-        })
+        method: "GET",
+        url: `/bot/media/progress/${jobId}`,
+        responseType: "stream",
+        headers: { Accept: "text/event-stream" },
+      })
         .then((res) => {
           const rl = readline.createInterface({ input: res.data });
           rl.on("line", (line) => {
