@@ -209,17 +209,31 @@ Des limiteurs plus ciblés sont disponibles dans
 Le déploiement PlanetHoster est décrit par deux workflows GitHub Actions :
 
 - [`main.yml`](./.github/workflows/main.yml) déploie automatiquement chaque
-  push sur `main` ;
+  push sur `main` dans `$HOME/bot` ;
 - [`first-deployment.yml`](./.github/workflows/first-deployment.yml) initialise
-  manuellement une nouvelle installation.
+  manuellement une nouvelle installation ;
+- [`test.yml`](./.github/workflows/test.yml) déploie automatiquement chaque
+  push sur `test` dans `$HOME/bot-test` ;
+- [`init-test-deployment.yml`](./.github/workflows/init-test-deployment.yml)
+  initialise manuellement cet environnement de test isolé.
 
-Les fichiers de configuration de production (`.env`, `.env.*`, `.htaccess`,
-etc.) doivent être créés directement sur le serveur avant le premier
-déploiement. Les workflows ne copient jamais les fichiers `.env` locaux et ne
-transmettent pas les secrets de production dans le dépôt.
-Les mises à jour utilisent l'ancien et le nouveau commit de `main`, conservent
-les fichiers cachés du serveur et ne réinitialisent pas la base de données. La
-base reste gérée par l'API StreamLoaders, pas par ce bot.
+Les fichiers de configuration (`.env`, `.env.*`, `.htaccess`, etc.) doivent
+être créés directement sur le serveur avant le déploiement. Les workflows ne
+copient jamais les fichiers `.env` locaux et ne transmettent pas les secrets
+dans le dépôt. Avant d'exécuter `init-test-deployment.yml`, créez
+`$HOME/bot-test/.env` et configurez-y un token Telegram, une URL publique, un
+port et une configuration API adaptés au test. Configurez aussi
+l'environnement et l'application Node CloudLinux dédiés
+`$HOME/nodevenv/bot-test/22` et `$HOME/bot-test`. Ne réutilisez pas le token
+Telegram de production : Telegram n'autorise qu'un seul webhook par bot.
+Les workflows de test utilisent les mêmes secrets SSH GitHub, mais un verrou
+de déploiement distinct.
+
+Les mises à jour de production suivent `main`; les mises à jour de test suivent
+`test`. Chaque déploiement conserve les fichiers cachés du répertoire cible et
+ne réinitialise pas la base de données. La base reste gérée par l'API
+StreamLoaders, pas par ce bot. Le projet testbot continue d'utiliser son
+répertoire distinct `$HOME/testbot`.
 
 ## Branches de travail
 
@@ -228,11 +242,12 @@ La hiérarchie de branches prévue pour ce projet est :
 ```text
 main
 └── dev
-    └── sync-process
+    └── test
 ```
 
-Les changements de cette session sont réalisés sur `sync-process`, créée à
-partir de `dev`, elle-même créée à partir de `main`.
+Le flux de validation prévu est `dev` → `test` → `main` : fusionnez d'abord
+les changements de `dev` dans `test` pour les valider sur `$HOME/bot-test`,
+puis fusionnez-les dans `main` pour les déployer sur `$HOME/bot`.
 
 ## Points d'attention
 
